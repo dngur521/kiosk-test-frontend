@@ -179,7 +179,7 @@ function App() {
 
   return (
     <div className="App" style={{ padding: "20px", textAlign: "center" }}>
-      <h1>🎙️ 음성 인식 중복 방지 (Ref 강화 버전)</h1>
+      <h1>🎙️음성 인식 중복 방지 (Ref 강화 버전)</h1>
       <p>
         상태: <strong>{status}</strong>{" "}
         {isSpeakingUI && (
