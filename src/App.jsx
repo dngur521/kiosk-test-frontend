@@ -8,17 +8,14 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [cartItems, setCartItems] = useState([]);
-  const [isSpeakingUI, setIsSpeakingUI] = useState(false); // UI 표시용
-  const [speechQueue, setSpeechQueue] = useState([]);
+  const [isSpeakingUI, setIsSpeakingUI] = useState(false);
 
   const socketRef = useRef(null);
   const audioContextRef = useRef(null);
   const streamRef = useRef(null);
-
-  // 🔥 [핵심] 리액트 상태 지연을 피하기 위해 Ref를 사용합니다.
-  // 이 값은 수정 즉시 startRecording 로직에 반영됩니다.
   const isSpeakingRef = useRef(false);
 
+  // 음성 안내 함수 (Web Speech API)
   const speak = (text) => {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "ko-KR";
@@ -30,14 +27,12 @@ function App() {
     };
 
     utterance.onend = () => {
-      // 음성이 끝났을 때만 1.5초 뒤에 방어막을 해제합니다.
       setTimeout(() => {
-        // 🚨 현재 재생 중인 다른 음성이 없을 때만 마이크를 엽니다.
         if (!window.speechSynthesis.speaking) {
           isSpeakingRef.current = false;
           setIsSpeakingUI(false);
         }
-      }, 1500);
+      }, 1500); // 안내 후 1.5초간 마이크 차단
     };
 
     window.speechSynthesis.speak(utterance);
@@ -51,68 +46,84 @@ function App() {
       const message = event.data;
       console.log("📩 서버 메시지 수신:", message);
 
-      // 일반 자막(STT 결과)만 방어막으로 거르고, SYSTEM 메시지는 무조건 통과시킵니다.
-      if (!message.startsWith("SYSTEM:") && isSpeakingRef.current) {
-        return;
-      }
+      if (!message.startsWith("SYSTEM:") && isSpeakingRef.current) return;
 
-      // 주문 성공 처리 (기존 로직 유지)
+      // 1. 주문 성공
       if (message.startsWith("SYSTEM:ORDER_SUCCESS:")) {
-        // 2️⃣ [방어막 2] 성공 메시지 받자마자 즉시 Ref 잠금
-
         const [, , menuName, quantity] = message.split(":");
-        setTranscript(`✅ 주문 성공: ${menuName} ${quantity}개`);
+        setTranscript(`✅ 주문: ${menuName} ${quantity}개`);
 
-        setCartItems((prev) => [
-          ...prev,
-          {
-            name: menuName,
-            qty: quantity,
-            time: new Date().toLocaleTimeString(),
-          },
-        ]);
-
-        speak(`${menuName} ${quantity}개가 담겼습니다.`);
+        setCartItems((prev) => {
+          const existing = prev.find((item) => item.name === menuName);
+          if (existing) {
+            return prev.map((item) =>
+              item.name === menuName
+                ? { ...item, qty: parseInt(item.qty) + parseInt(quantity) }
+                : item,
+            );
+          }
+          return [
+            ...prev,
+            {
+              name: menuName,
+              qty: quantity,
+              time: new Date().toLocaleTimeString(),
+            },
+          ];
+        });
+        speak(`${menuName} ${quantity}개가 장바구니에 담겼습니다.`);
       }
-      // 취소 성공 처리 (SYSTEM:CANCEL_SUCCESS)
+
+      // 2. 개별 취소 성공 (SYSTEM:CANCEL_SUCCESS:메뉴명:수량)
+      // App.jsx의 onmessage 내 개별 취소 로직 수정
       else if (message.startsWith("SYSTEM:CANCEL_SUCCESS:")) {
         const parts = message.split(":");
         const menuName = parts[2];
-        const cancelQty = parts[3]; // "1" 혹은 "ALL"
+        const quantityStr = parts[3]; // "1", "2" 또는 "ALL"
 
         setTranscript(
-          `🗑️ 취소: ${menuName} ${cancelQty === "ALL" ? "전체" : cancelQty + "개"}`,
+          `🗑️ 취소: ${menuName} ${quantityStr === "ALL" ? "전체" : quantityStr + "개"}`,
         );
 
-        if (cancelQty === "ALL") {
-          setCartItems((prev) => prev.filter((item) => item.name !== menuName));
-          speak(`${menuName} 전체 취소가 완료되었습니다.`);
-        } else {
-          setCartItems(
-            (prev) =>
-              prev
-                .map((item) =>
-                  item.name === menuName
-                    ? {
-                        ...item,
-                        qty: Math.max(0, item.qty - parseInt(cancelQty)),
-                      }
-                    : item,
-                )
-                .filter((item) => item.qty > 0), // 0개가 되면 목록에서 제거
-          );
-          speak(`${menuName} ${cancelQty}개 취소되었습니다.`);
-        }
-      } else if (message.startsWith("SYSTEM:REASK_QUANTITY:")) {
+        setCartItems((prev) => {
+          // 1. "ALL"인 경우: 해당 메뉴를 리스트에서 아예 제거
+          if (quantityStr === "ALL") {
+            return prev.filter((item) => item.name !== menuName);
+          }
+
+          // 2. 숫자인 경우: 해당 수량만큼 차감
+          const cancelQty = parseInt(quantityStr) || 1;
+          return prev
+            .map((item) =>
+              item.name === menuName
+                ? { ...item, qty: item.qty - cancelQty }
+                : item,
+            )
+            .filter((item) => item.qty > 0); // 0개 이하가 되면 제거
+        });
+
+        const speakMsg =
+          quantityStr === "ALL"
+            ? `${menuName} 전체 취소가 완료되었습니다.`
+            : `${menuName} ${quantityStr}개 취소되었습니다.`;
+        speak(speakMsg);
+      }
+
+      // 3. 🔥 [핵심 추가] 전체 삭제 성공 (SYSTEM:CLEAR_CART_SUCCESS)
+      else if (message === "SYSTEM:CLEAR_CART_SUCCESS") {
+        setTranscript("🗑️ 모든 메뉴를 삭제했습니다.");
+        setCartItems([]); // 장바구니 초기화
+        speak("장바구니의 모든 메뉴를 비웠습니다.");
+      }
+
+      // 4. 수량 재질의 (모호한 표현 시)
+      else if (message.startsWith("SYSTEM:REASK_QUANTITY:")) {
         const menuName = message.split(":")[2];
-        // 팝업창으로 수량 입력 받기 (음성 인식이 미흡할 때를 대비한 백업)
         const userQty = window.prompt(
-          `🛒 ${menuName} 수량을 입력해 주세요 (1~10):`,
+          `🛒 ${menuName} 몇 개를 드릴까요? (1~10):`,
           "1",
         );
-
         if (userQty) {
-          speak(`${menuName} ${userQty}개가 담겼습니다.`);
           setCartItems((prev) => [
             ...prev,
             {
@@ -121,17 +132,23 @@ function App() {
               time: new Date().toLocaleTimeString(),
             },
           ]);
+          speak(`${menuName} ${userQty}개 확인했습니다.`);
         }
-      } else {
+      }
+
+      // 5. 일반 인식 텍스트
+      else {
         if (!isSpeakingRef.current) setTranscript(message);
       }
     };
+
+    socketRef.current.onerror = () => setStatus("❌ 에러 발생");
+    socketRef.current.onclose = () => setStatus("🔒 연결 종료됨");
   };
 
   const startRecording = async () => {
     if (socketRef.current?.readyState !== WebSocket.OPEN)
       return alert("연결 확인!");
-
     try {
       streamRef.current = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -152,8 +169,6 @@ function App() {
       );
 
       workletNode.port.onmessage = (event) => {
-        // 🔥 [핵심 로직] useState가 아닌 isSpeakingRef.current를 체크합니다.
-        // 안내 중이면 백엔드로 오디오 데이터를 0.1%도 보내지 않습니다.
         if (
           socketRef.current.readyState === WebSocket.OPEN &&
           !isSpeakingRef.current
@@ -179,54 +194,84 @@ function App() {
 
   return (
     <div className="App" style={{ padding: "20px", textAlign: "center" }}>
-      <h1>🎙️음성 인식 중복 방지 (Ref 강화 버전)</h1>
+      <h1>🎙️ 지능형 음성 주문 시스템</h1>
       <p>
         상태: <strong>{status}</strong>{" "}
         {isSpeakingUI && (
-          <span style={{ color: "red" }}>(안내 중 - 마이크 차단됨)</span>
+          <span style={{ color: "red", fontWeight: "bold" }}>
+            (안내 중 - 마이크 잠금)
+          </span>
         )}
       </p>
 
-      {/* ... 이하 UI 동일 ... */}
       <div style={{ marginBottom: "20px" }}>
         <button onClick={connectWebSocket}>1. 서버 연결</button>
-        <button onClick={startRecording} disabled={isRecording}>
+        <button
+          onClick={startRecording}
+          disabled={isRecording}
+          style={{ background: "green", color: "white", marginLeft: "10px" }}
+        >
           2. 주문 시작
         </button>
-        <button onClick={stopRecording} disabled={!isRecording}>
+        <button
+          onClick={stopRecording}
+          disabled={!isRecording}
+          style={{ background: "red", color: "white", marginLeft: "10px" }}
+        >
           3. 주문 종료
         </button>
       </div>
+
       <div style={{ display: "flex", justifyContent: "center", gap: "20px" }}>
         <div
           style={{
             width: "45%",
             border: "2px solid #007bff",
             padding: "15px",
-            minHeight: "200px",
+            borderRadius: "10px",
+            minHeight: "250px",
           }}
         >
           <h3>👂 인식된 내용</h3>
-          <p style={{ fontSize: "1.4rem", color: "#007bff" }}>{transcript}</p>
+          <p
+            style={{ fontSize: "1.4rem", color: "#007bff", fontWeight: "500" }}
+          >
+            {transcript || "말씀해 주세요..."}
+          </p>
         </div>
+
         <div
           style={{
             width: "45%",
             border: "2px solid #28a745",
             padding: "15px",
-            minHeight: "200px",
+            borderRadius: "10px",
+            minHeight: "250px",
+            backgroundColor: "#f8fff8",
           }}
         >
           <h3>🛒 장바구니</h3>
           <ul style={{ listStyle: "none", padding: 0 }}>
-            {cartItems.map((item, i) => (
-              <li
-                key={i}
-                style={{ borderBottom: "1px dotted #ccc", padding: "5px" }}
-              >
-                {item.name} - {item.qty}개 ({item.time})
-              </li>
-            ))}
+            {cartItems.length === 0 ? (
+              <p style={{ color: "#888" }}>비어 있습니다.</p>
+            ) : (
+              cartItems.map((item, i) => (
+                <li
+                  key={i}
+                  style={{
+                    borderBottom: "1px solid #eee",
+                    padding: "8px 0",
+                    fontSize: "1.1rem",
+                  }}
+                >
+                  <strong>{item.name}</strong> -{" "}
+                  <span style={{ color: "red" }}>{item.qty}개</span>
+                  <div style={{ fontSize: "0.8rem", color: "#999" }}>
+                    {item.time}
+                  </div>
+                </li>
+              ))
+            )}
           </ul>
         </div>
       </div>
